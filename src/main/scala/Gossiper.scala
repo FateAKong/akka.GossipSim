@@ -5,113 +5,94 @@
  * Time: 5:36 PM
  */
 
-import akka.actor.{ActorRef, Actor}
+import akka.actor.Actor
 import scala.util.Random
 
-abstract class Gossiper(val termCnt: Int) extends Actor {
-  var id: Int = 0
+abstract class Gossiper(val topology: Topology, val termCnt: Int) extends Actor {
+  var idx: Int = 0
   var curCnt: Int = 0
   val random = new Random
-  var neighbors: Array[ActorRef] = _
+  var iNeighbors: Array[Int] = _
 
   override def preStart() = {
     // TODO some other more specific way to calculate a seed
     random.setSeed(this.hashCode.toLong)
   }
 
-  override def postStop() = {
-    neighbors foreach (_ ! Remove(self))
-  }
+  protected def iNextNeighbor: Int = iNeighbors(random.nextInt(iNeighbors.length))
 
-  def nextNeighbor: ActorRef =
-  // TODO how to solve dead lock??? how about some one not even get one msg at all
-    if (neighbors.isEmpty) { println(id + "'s next is self")
-      self
-    }
-    else {
-      val r = random.nextInt(neighbors.length)
-      println(id + "'s next is " )
-      neighbors(r)
-    }
-
-  def genericMessageHandler: Receive = {
-    case Remove(removeMe) =>
-      println(id+" updated neighbors")
-      neighbors = neighbors filterNot (_ equals removeMe)
-    case Init(_id, _neighbors) =>
-      id = _id
-      neighbors = _neighbors
+  private def genericMessageHandler: Receive = {
+    case Init(_idx, _iNeighbors) =>
+      idx = _idx
+      iNeighbors = _iNeighbors
       sender ! Ready
   }
 
-  def specificMessageHandler: Receive
+  protected def specificMessageHandler: Receive
 
   def receive = specificMessageHandler.orElse(genericMessageHandler)
 
 }
 
-class GossipGossiper(val _termCnt: Int = 10)
-  extends Gossiper(_termCnt) {
-
-  var isDone = false
+class GossipGossiper(topology: Topology, termCnt: Int)
+  extends Gossiper(topology, termCnt) {
 
   def specificMessageHandler: Receive = {
     case Content =>
-      curCnt += 1
-      println(id+"\t"+curCnt)
-      if (curCnt == termCnt) {
-        println(this.id + " terminates")
-        context.parent ! Done
-        isDone = true
-//        context.stop(self)
-      }
-      self ! Spread
-    case Spread =>
-      if (!isDone)
-      nextNeighbor ! Content
-//      self ! Wait
-    case Wait =>
-//      wait(500)
-      self ! Spread
-  }
+      // once every Gossiper has sent a Done msg then system terminates
+      if (curCnt==0) context.parent ! Done
 
+      // system also terminates when any Gossiper gets content 10 times
+      curCnt += 1
+      if (curCnt < termCnt) {
+        self ! Send
+      } else if (curCnt == termCnt) {
+        println("Gossiper#" + this.idx + " triggers termination")
+        context.parent ! Term
+      }
+    case Send =>
+      val in = iNextNeighbor
+      topology.gossiper(in) ! Content
+  }
 }
 
-class PushSumGossiper(val _termCnt: Int = 3)
-  extends Gossiper(_termCnt) {
-  private var s: Double = id
+class PushSumGossiper(topology: Topology, termCnt: Int)
+  extends Gossiper(topology, termCnt) {
+  private var s: Double = idx
   private var w: Double = 1
   private val isConverging: Array[Boolean] = Array.fill(termCnt)(false)
 
   def specificMessageHandler: Receive = {
-    case Spread =>
-      s /= 2.0
-      w /= 2.0
-      nextNeighbor ! Content(s, w)
-      self ! Wait
     case Content(_s, _w) =>
       curCnt += 1
       isConverging(curCnt % termCnt) = scala.math.abs(s / w - (s + _s) / (w + _w)) < 1e-10
       s += _s
       w += _w
       if (isConverging forall (_ == true)) {
-        println(this.id + " terminates")
-        context.stop(self)
+        println("Gossiper#" + this.idx + " triggers termination")
+        context.parent ! Result(s/w)
+        context.parent ! Term
       }
-      // TODO exit(FinalSum(s / w))
-      else self ! Wait
-    case Wait =>
-//      wait(500)
-      self ! Spread
+      self ! Send
+    case Send =>
+      s /= 2.0
+      w /= 2.0
+      topology.gossiper(iNextNeighbor) ! Content(s, w)
   }
 
 }
 
 object GossiperFactory {
-  def create(s: String): () => Gossiper = {
+  def create(s: String, termCnt: Int): (Topology) => Gossiper = {
     s match {
-      case "gossip" => () => new GossipGossiper()
-      case "pushsum" => () => new PushSumGossiper()
+      case "gossip" =>
+        (topology: Topology) =>
+          if (termCnt>0) new GossipGossiper(topology, termCnt)
+          else new GossipGossiper(topology, 10)
+      case "push-sum" =>
+        (topology: Topology) =>
+          if (termCnt>0) new PushSumGossiper(topology, termCnt)
+          else new PushSumGossiper(topology, 3)
     }
   }
 }

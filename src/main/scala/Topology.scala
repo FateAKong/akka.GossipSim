@@ -9,83 +9,88 @@ import akka.actor.{Props, ActorRef, Actor}
 import scala.util.Random
 import scala.math.{sqrt, abs}
 
-abstract class Topology(val nGossipers: Int, val createGossiper: () => Gossiper) extends Actor {
+abstract class Topology(val nGossipers: Int, val createGossiper: (Topology) => Gossiper) extends Actor {
 
-  val gossipers = new Array[ActorRef](nGossipers)
+  private val gossipers = new Array[ActorRef](nGossipers)
 
-  var nCurGossipers = 0
+  private var nCurGossipers = 0
 
-  def neighbors(iGossiper: Int): Array[ActorRef]
+  protected def iNeighbors(iGossiper: Int): Array[Int]
+
+  def gossiper(iGossiper: Int): ActorRef = {
+    gossipers(iGossiper)
+  }
 
   def receive = {
     case Start =>
-      println(this.toString() + "#Start")
+      println(this.toString + "#Start")
       for (i <- 0 until nGossipers) {
-        gossipers(i) = context.actorOf(Props(createGossiper()))
+        gossipers(i) = context.actorOf(Props(createGossiper(this)))
       }
       for (i <- 0 until nGossipers) {
-        gossipers(i) ! Init(i, neighbors(i))
+        gossipers(i) ! Init(i, iNeighbors(i))
       }
     case Ready =>
       nCurGossipers += 1
       if (nCurGossipers == nGossipers) {
-        println(this.toString() + "#Ready")
-        gossipers(Random.nextInt(nGossipers)) ! Spread
+        println(this.toString + "#Ready")
+        gossipers(Random.nextInt(nGossipers)) ! Send
       }
     case Done =>
       nCurGossipers -= 1
-      println(nCurGossipers + "/" + nGossipers + "still working")
       if (nCurGossipers == 0) {
-        println(this.toString() + "#Done")
+        println(this.toString + "#Done")
         context.system.shutdown()
       }
-
+    case Term =>
+      println(nCurGossipers + "/" + nGossipers + " have not received content yet")
+      println(this.toString + "#Term")
+      context.system.shutdown()
   }
 }
 
-class FullTopology(nGossipers: Int, createGossiper: () => Gossiper)
+class FullTopology(nGossipers: Int, createGossiper: (Topology) => Gossiper)
   extends Topology(nGossipers, createGossiper) {
-  override def neighbors(iGossipers: Int): Array[ActorRef] = {
-    Array.range(0, nGossipers).filterNot(_ == iGossipers).map(gossipers(_))
+  override def iNeighbors(iGossipers: Int): Array[Int] = {
+    Array.range(0, nGossipers).filterNot(_ == iGossipers)
   }
 }
 
-class LineTopology(nGossipers: Int, createGossiper: () => Gossiper)
+class LineTopology(nGossipers: Int, createGossiper: (Topology) => Gossiper)
   extends Topology(nGossipers, createGossiper) {
-  override def neighbors(iGossiper: Int): Array[ActorRef] =
-    Array(iGossiper - 1, iGossiper + 1).filterNot(i => i < 0 || i >= nGossipers).map(gossipers(_))
+  override def iNeighbors(iGossiper: Int): Array[Int] =
+    Array(iGossiper - 1, iGossiper + 1).filterNot(i => i < 0 || i >= nGossipers)
 }
 
 // here the nGossipers has already been rounded up
-class GridTopology(nGossipers: Int, createGossiper: () => Gossiper) extends Topology(nGossipers, createGossiper) {
+class GridTopology(nGossipers: Int, createGossiper: (Topology) => Gossiper) extends Topology(nGossipers, createGossiper) {
 
   val lenSide: Int = sqrt(nGossipers).toInt
 
-  def iNeighbors(iGossiper: Int): Array[Int] = {
+  def iLRUD(iGossiper: Int): Array[Int] = {
     val iRow: Int = iGossiper / lenSide
     val iCol: Int = iGossiper % lenSide
     val iLeft: Int = if (iCol == 0) -1 else iGossiper - 1
     val iRight: Int = if (iCol == lenSide - 1) nGossipers else iGossiper + 1
-    val iUp: Int = iGossiper - iRow
-    val iDown: Int = iGossiper + iRow
+    val iUp: Int = iGossiper - lenSide
+    val iDown: Int = iGossiper + lenSide
     Array(iLeft, iRight, iUp, iDown)
   }
 
-  override def neighbors(iGossiper: Int): Array[ActorRef] = {
-    iNeighbors(iGossiper).filterNot(i => i < 0 || i >= nGossipers).map(gossipers(_))
+  override def iNeighbors(iGossiper: Int): Array[Int] = {
+    iLRUD(iGossiper).filterNot(i => i < 0 || i >= nGossipers)
   }
 }
 
-class ImperfectGridTopology(nGossipers: Int, createGossiper: () => Gossiper) extends GridTopology(nGossipers, createGossiper) {
+class ImperfectGridTopology(nGossipers: Int, createGossiper: (Topology) => Gossiper) extends GridTopology(nGossipers, createGossiper) {
 
   val random = new Random(System.currentTimeMillis())
 
-  override def neighbors(iGossiper: Int): Array[ActorRef] = {
-    val iGridNeighbors = iNeighbors(iGossiper)
+  override def iNeighbors(iGossiper: Int): Array[Int] = {
+    val iGridNeighbors = super.iNeighbors(iGossiper)
     val iRandNeighbors = Array.range(0, nGossipers).filterNot(i => iGridNeighbors.contains(i) || i == iGossiper)
     val iRandNeighbor = iRandNeighbors(random.nextInt(iRandNeighbors.length))
-    val iImperfectGridNeighbors = iGridNeighbors :+ iRandNeighbor
-    iImperfectGridNeighbors.map(gossipers(_))
+    iGridNeighbors :+ iRandNeighbor
   }
 }
 
@@ -101,16 +106,16 @@ object TopologyFactory {
     }
   }
 
-  def create(tType: String): (Int, String) => Topology = {
+  def create(tType: String, termCnt: Int): (Int, String) => Topology = {
     tType match {
       case "full" =>
-        (nGossipers: Int, gType: String) => new FullTopology(nGossipers, GossiperFactory.create(gType))
+        (nGossipers: Int, gType: String) => new FullTopology(nGossipers, GossiperFactory.create(gType, termCnt))
       case "line" =>
-        (nGossipers: Int, gType: String) => new LineTopology(nGossipers, GossiperFactory.create(gType))
-      case "grid" =>
-        (nGossipers: Int, gType: String) => new GridTopology(roundSquare(nGossipers), GossiperFactory.create(gType))
-      case "ipgrid" =>
-        (nGossipers: Int, gType: String) => new ImperfectGridTopology(roundSquare(nGossipers), GossiperFactory.create(gType))
+        (nGossipers: Int, gType: String) => new LineTopology(nGossipers, GossiperFactory.create(gType, termCnt))
+      case "2D" =>
+        (nGossipers: Int, gType: String) => new GridTopology(roundSquare(nGossipers), GossiperFactory.create(gType, termCnt))
+      case "imp2D" =>
+        (nGossipers: Int, gType: String) => new ImperfectGridTopology(roundSquare(nGossipers), GossiperFactory.create(gType, termCnt))
     }
   }
 }

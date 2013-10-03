@@ -11,18 +11,18 @@ sealed trait Message
 
 case object Start extends Message
 
-case object Spread extends Message
-
-case object Wait extends Message
+case object Send extends Message
 
 case object Ready extends Message
 
 case object Done extends Message
 
+case object Term extends Message
+
 case object Content extends Message
 
-case class Content(val s: Double, val w: Double) extends Message
+case class Content(s: Double, w: Double) extends Message
 
-case class Init(_id: Int, _neighbors: Array[ActorRef])
+case class Init(id: Int, iNeighbors: Array[Int])
 
-case class Remove(removeMe: ActorRef) extends Message
+case class Result(res: Double)
