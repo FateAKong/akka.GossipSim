@@ -13,7 +13,15 @@ abstract class Topology(val nGossipers: Int, val createGossiper: (Topology) => G
 
   private val gossipers = new Array[ActorRef](nGossipers)
 
-  private var nCurGossipers = 0
+  private var nCurGossipers: Int = _
+  private var startTime: Long = _
+
+  // set read-only from outside
+  var isTerminating: Boolean = _
+
+  private var sSum: Double = _
+  private var wSum: Double = _
+  private var resExpected: Double = _ // expected result for Push-Sum
 
   protected def iNeighbors(iGossiper: Int): Array[Int]
 
@@ -23,7 +31,7 @@ abstract class Topology(val nGossipers: Int, val createGossiper: (Topology) => G
 
   def receive = {
     case Start =>
-      println(this.toString + "#Start")
+      println("build topology")
       for (i <- 0 until nGossipers) {
         gossipers(i) = context.actorOf(Props(createGossiper(this)))
       }
@@ -33,19 +41,41 @@ abstract class Topology(val nGossipers: Int, val createGossiper: (Topology) => G
     case Ready =>
       nCurGossipers += 1
       if (nCurGossipers == nGossipers) {
-        println(this.toString + "#Ready")
-        gossipers(Random.nextInt(nGossipers)) ! Send
+        println("start protocol")
+        startTime = System.currentTimeMillis
+        gossipers(Random.nextInt(nGossipers)) ! Content
       }
-    case Done =>
+
+    case First => // Gossip
+      nCurGossipers -= 1
+      if (nCurGossipers == 0 && !isTerminating) {
+        self ! Term
+      }
+
+    case First(s, w) => // Push-Sum
+      sSum += s
+      wSum += w
       nCurGossipers -= 1
       if (nCurGossipers == 0) {
-        println(this.toString + "#Done")
-        context.system.shutdown()
+        resExpected = sSum / wSum
       }
+
     case Term =>
-      println(nCurGossipers + "/" + nGossipers + " have not received content yet")
-      println(this.toString + "#Term")
+      isTerminating = true
+      println("shutdown system")
+      println("propagate ratio " + (nGossipers - nCurGossipers) + "/" + nGossipers)
+      println("cost time " + (System.currentTimeMillis - startTime) + " ms")
       context.system.shutdown()
+
+    case Result(res) =>
+      // Push-Sum expected result is sum of all initial s divided by sum of all initial w
+      if (resExpected == 0) {
+        resExpected = sSum / wSum
+        println("expected result " + resExpected + " (based on " + (nGossipers - nCurGossipers) + " gossipers)")
+      } else {
+        println("expected result " + resExpected)
+      }
+      println("converging result " + res)
   }
 }
 
