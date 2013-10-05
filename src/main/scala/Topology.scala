@@ -61,11 +61,13 @@ abstract class Topology(val nGossipers: Int, val createGossiper: (Topology) => G
       }
 
     case Term =>
-      isTerminating = true
-      println("shutdown system")
-      println("propagate ratio " + (nGossipers - nCurGossipers) + "/" + nGossipers)
-      println("cost time " + (System.currentTimeMillis - startTime) + " ms")
-      context.system.shutdown()
+      if (!isTerminating) {
+        isTerminating = true
+        println("shutdown system")
+        println("propagate ratio " + (nGossipers - nCurGossipers) + "/" + nGossipers)
+        println("cost time " + (System.currentTimeMillis - startTime) + " ms")
+        context.system.shutdown()
+      }
 
     case Result(res) =>
       // Push-Sum expected result is sum of all initial s divided by sum of all initial w
